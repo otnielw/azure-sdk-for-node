@@ -34,84 +34,102 @@ var policiesType;
 describe('Intune Resource Management', function() {
 
   before(function(done) {
-    IntuneTestUtils
-      .getTokenCloudCredentials(process.env['USERNAME'], process.env['PASSWORD'], process.env['CLIENT_ID'])
-      .then(function(tokenCloudCredentials) {
-        client = new IntuneResourceManagementClient(tokenCloudCredentials);
-        client.getLocationByHostName(null, function(err, result) {
+    var clientId = process.env['CLIENT_ID'];
+    var username = process.env['USERNAME'];
+    var password = process.env['PASSWORD'];
+
+    if (!clientId) {
+      throw new Error('You must set the CLIENT_ID environment variable');
+    }
+
+    if (!username) {
+      throw new Error('You must set the USERNAME environment variable');
+    }
+
+    if (!password) {
+      throw new Error('You must set the PASSWORD environment variable');
+    }
+
+    var tokenCloudCredentials = new msRestAzure.UserTokenCredentials(clientId, username.split('@')[1], username, password, 'dummy')
+
+    client = new IntuneResourceManagementClient(tokenCloudCredentials, 'https://api-dogfood.resources.windows-int.net');
+
+    // We need the location for the account before performin any operations
+    client.getLocationByHostName(null, function(err, result) {
+      should.not.exist(err);
+      should.exist(result);
+      should.exist(result.hostName);
+      location = result.hostName;
+
+      // Setup resolvers
+      doneDeleting = IntuneTestUtils.done(2, createInitialPolicies);
+      done = IntuneTestUtils.done(3, done);
+
+      // Delete all iOS Policies
+      IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.iOS, function(success) {
+        success.should.be.true;
+        doneDeleting();
+      });
+
+      // Delete all Android Policies
+      IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.Android, function(success) {
+        success.should.be.true;
+        doneDeleting();
+      });
+
+      // Precache the list of available apps before running tests
+      client.getApps(location, null, null, null, null, function(err, result, request, response) {
+        should.not.exist(err);
+        should.exist(result);
+        result.length.should.be.greaterThan(0);
+        response.statusCode.should.equal(200);
+
+        iOSApps = result.filter(function(app) {
+          return app.platform === 'ios';
+        });
+
+        androidApps = result.filter(function(app) {
+          return app.platform === 'android';
+        });
+
+        done();
+      });
+
+      // Helper method that creates a single iOS and Android policies
+      function createInitialPolicies() {
+        iOSPolicyId = uuid.v4();
+        var iOSPolicyPayload = IntuneTestUtils.getPolicyPutPayload(IntuneTestUtils.PolicyType.iOS);
+        client.ios.createOrUpdateMAMPolicy(location, iOSPolicyId, iOSPolicyPayload, null, function(err, result, request, response) {
           should.not.exist(err);
           should.exist(result);
-          should.exist(result.hostName);
-          location = result.hostName;
+          response.statusCode.should.equal(200);
 
-          // Setup resolvers
-          doneDeleting = IntuneTestUtils.done(2, createInitialPolicies);
-          done = IntuneTestUtils.done(3, done);
-
-          // Delete all iOS Policies
-          IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.iOS, function(success) {
-            success.should.be.true;
-            doneDeleting();
-          });
-
-          // Delete all Android Policies
-          IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.Android, function(success) {
-            success.should.be.true;
-            doneDeleting();
-          });
-
-          client.getApps(location, null, null, null, null, function(err, result, request, response) {
+          // Make sure policy is there
+          client.ios.getMAMPolicyById(location, iOSPolicyId, null, null, function(err, result, request, response) {
             should.not.exist(err);
             should.exist(result);
-            result.length.should.be.greaterThan(0);
             response.statusCode.should.equal(200);
-
-            iOSApps = result.filter(function(app) {
-              return app.platform === 'ios';
-            });
-
-            androidApps = result.filter(function(app) {
-              return app.platform === 'android';
-            });
-
             done();
           });
-
-          function createInitialPolicies() {
-            iOSPolicyId = uuid.v4();
-            var iOSPolicyPayload = IntuneTestUtils.getPolicyPutPayload(IntuneTestUtils.PolicyType.iOS);
-            client.ios.createOrUpdateMAMPolicy(location, iOSPolicyId, iOSPolicyPayload, null, function(err, result, request, response) {
-              should.not.exist(err);
-              should.exist(result);
-              response.statusCode.should.equal(200);
-
-              // Make sure policy is there
-              client.ios.getMAMPolicyById(location, iOSPolicyId, null, null, function(err, result, request, response) {
-                should.not.exist(err);
-                should.exist(result);
-                response.statusCode.should.equal(200);
-                done();
-              });
-            });
-
-            androidPolicyId = uuid.v4();
-            var androidPolicyPayload = IntuneTestUtils.getPolicyPutPayload(IntuneTestUtils.PolicyType.Android);
-            client.android.createOrUpdateMAMPolicy(location, androidPolicyId, androidPolicyPayload, null, function(err, result, request, response) {
-              should.not.exist(err);
-              should.exist(result);
-              response.statusCode.should.equal(200);
-
-              // Make sure policy is there
-              client.android.getMAMPolicyById(location, androidPolicyId, null, null, function(err, result, request, response) {
-                should.not.exist(err);
-                should.exist(result);
-                response.statusCode.should.equal(200);
-                done();
-              });
-            });
-          }
         });
-      });
+
+        androidPolicyId = uuid.v4();
+        var androidPolicyPayload = IntuneTestUtils.getPolicyPutPayload(IntuneTestUtils.PolicyType.Android);
+        client.android.createOrUpdateMAMPolicy(location, androidPolicyId, androidPolicyPayload, null, function(err, result, request, response) {
+          should.not.exist(err);
+          should.exist(result);
+          response.statusCode.should.equal(200);
+
+          // Make sure policy is there
+          client.android.getMAMPolicyById(location, androidPolicyId, null, null, function(err, result, request, response) {
+            should.not.exist(err);
+            should.exist(result);
+            response.statusCode.should.equal(200);
+            done();
+          });
+        });
+      }
+    });
   });
 
   after(function(done) {

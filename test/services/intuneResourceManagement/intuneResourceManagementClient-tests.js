@@ -21,6 +21,8 @@ var util = require('util');
 var msRestAzure = require('ms-rest-azure')
 var IntuneResourceManagementClient = require('../../../lib/services/intune/lib/intuneResourceManagementClient');
 var IntuneTestUtils = require('./intuneResourceManagementClient-tests-utils');
+var MockedTestUtils = require('../../framework/mocked-test-utils');
+//var SuiteBase = require('../../framework/suite-base');
 
 var client;
 var location;
@@ -30,6 +32,10 @@ var androidApps;
 var iOSPolicyId;
 var policiesCreated = [];
 var policiesType;
+var userGroups;
+var baseUrl;
+var testPrefix = 'intune-tests';
+var suiteUtil;
 
 describe('Intune Resource Management', function() {
 
@@ -37,6 +43,7 @@ describe('Intune Resource Management', function() {
     var clientId = process.env['CLIENT_ID'];
     var username = process.env['USERNAME'];
     var password = process.env['PASSWORD'];
+    var environment = process.env['ENVIRONMENT'];
 
     if (!clientId) {
       throw new Error('You must set the CLIENT_ID environment variable');
@@ -50,9 +57,32 @@ describe('Intune Resource Management', function() {
       throw new Error('You must set the PASSWORD environment variable');
     }
 
-    var tokenCloudCredentials = new msRestAzure.UserTokenCredentials(clientId, username.split('@')[1], username, password, 'dummy')
+    if (!environment || environment !== 'dogfood') {
+      environment = 'production';
+      baseUrl = 'https://management.azure.com';
+    } else {
+      baseUrl = 'https://api-dogfood.resources.windows-int.net';
+    }
 
-    client = new IntuneResourceManagementClient(tokenCloudCredentials, 'https://api-dogfood.resources.windows-int.net');
+    //suiteUtil = new SuiteBase(this, testPrefix, requiredEnvironment);
+    //client = new IntuneResourceManagementClient(suiteUtil.credentials, baseUrl);
+
+    var tokenCloudCredentials = new msRestAzure.UserTokenCredentials(clientId, username.split('@')[1], username, password, 'dummy');
+    client = new IntuneResourceManagementClient(tokenCloudCredentials, baseUrl);
+
+    doneSettingUp = IntuneTestUtils.done(4, function(){
+      suiteUtil = new MockedTestUtils(client, testPrefix);
+      suiteUtil.setupSuite(done);
+    });
+
+    userGroups = IntuneTestUtils.getAADUserGroups(username, password, clientId, function(groups) {
+      // We need at least 2 groups to do all the tests!
+      groups.length.should.be.greaterThan(2);
+
+      userGroups = groups;
+
+      doneSettingUp();
+    });
 
     // We need the location for the account before performin any operations
     client.getLocationByHostName(null, function(err, result) {
@@ -63,7 +93,6 @@ describe('Intune Resource Management', function() {
 
       // Setup resolvers
       doneDeleting = IntuneTestUtils.done(2, createInitialPolicies);
-      done = IntuneTestUtils.done(3, done);
 
       // Delete all iOS Policies
       IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.iOS, function(success) {
@@ -81,8 +110,8 @@ describe('Intune Resource Management', function() {
       client.getApps(location, null, null, null, null, function(err, result, request, response) {
         should.not.exist(err);
         should.exist(result);
-        result.length.should.be.greaterThan(0);
         response.statusCode.should.equal(200);
+        result.length.should.be.greaterThan(0);
 
         iOSApps = result.filter(function(app) {
           return app.platform === 'ios';
@@ -92,11 +121,17 @@ describe('Intune Resource Management', function() {
           return app.platform === 'android';
         });
 
-        done();
+        doneSettingUp();
       });
 
       // Helper method that creates a single iOS and Android policies
       function createInitialPolicies() {
+        var groupProperties = {
+          properties: {
+            url: baseUrl + '/providers/Microsoft.Intune/locations/' + location + '/groups/' + userGroups[0].objectId
+          }
+        };
+
         iOSPolicyId = uuid.v4();
         var iOSPolicyPayload = IntuneTestUtils.getPolicyPutPayload(IntuneTestUtils.PolicyType.iOS);
         client.ios.createOrUpdateMAMPolicy(location, iOSPolicyId, iOSPolicyPayload, null, function(err, result, request, response) {
@@ -109,7 +144,17 @@ describe('Intune Resource Management', function() {
             should.not.exist(err);
             should.exist(result);
             response.statusCode.should.equal(200);
-            done();
+
+            // add a single group to policy
+            client.ios.addGroupForMAMPolicy(location, iOSPolicyId, userGroups[0].objectId, groupProperties, null, function(error, result, request, response) {
+              should.not.exist(err);
+
+              if (response.statusCode !== 200 && response.statusCode !== 204) {
+                response.statusCode.should.be.equal('200 or 204');
+              }
+
+              doneSettingUp();
+            });
           });
         });
 
@@ -125,7 +170,16 @@ describe('Intune Resource Management', function() {
             should.not.exist(err);
             should.exist(result);
             response.statusCode.should.equal(200);
-            done();
+
+            client.android.addGroupForPolicy(location, androidPolicyId, userGroups[0].objectId, groupProperties, null, function(error, result, request, response) {
+              should.not.exist(err);
+
+              if (response.statusCode !== 200 && response.statusCode !== 204) {
+                response.statusCode.should.be.equal('200 or 204');
+              }
+
+              doneSettingUp();
+            });
           });
         });
       }
@@ -133,35 +187,40 @@ describe('Intune Resource Management', function() {
   });
 
   after(function(done) {
-    // Clean up after all tests are done running
     done = IntuneTestUtils.done(2, done);
 
-    // Delete all iOS Policies
-    IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.iOS, function(success) {
-      success.should.be.true;
-      done();
-    });
+    suiteUtil.teardownSuite(deletePolicies);
 
-    // Delete all Android Policies
-    IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.Android, function(success) {
-      success.should.be.true;
-      done();
-    });
+    function deletePolicies() {
+      // Delete all iOS Policies
+      IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.iOS, function(success) {
+        success.should.be.true;
+        done();
+      });
+
+      // Delete all Android Policies
+      IntuneTestUtils.deleteAllPolicies(client, location, IntuneTestUtils.PolicyType.Android, function(success) {
+        success.should.be.true;
+        done();
+      });
+    }
   });
 
   beforeEach(function(done) {
-    // Do nothing for now
-    done();
+    suiteUtil.setupTest(done);
   });
 
   afterEach(function(done) {
-    // Clean up after each test
-    IntuneTestUtils.deletePolicies(client, location, policiesType, policiesCreated, function(success) {
-      success.should.be.true;
-      policiesCreated = [];
-      policiesType = null;
-      done();
-    });
+    suiteUtil.baseTeardownTest(deleteCreatedPolicies);
+
+    function deleteCreatedPolicies() {
+      IntuneTestUtils.deletePolicies(client, location, policiesType, policiesCreated, function(success) {
+        success.should.be.true;
+        policiesCreated = [];
+        policiesType = null;
+        done();
+      });
+    }
   });
 
   describe('- Locations', function() {
@@ -318,7 +377,7 @@ describe('Intune Resource Management', function() {
         var appId = iOSApps[0].name;
         var appProperties = {
           properties: {
-            url: 'https://api-dogfood.resources.windows-int.net' + iOSApps[0].id
+            url: baseUrl + iOSApps[0].id
           }
         };
         client.ios.addAppForMAMPolicy(location, iOSPolicyId, appId, appProperties, null, function(err, result, request, response) {
@@ -368,6 +427,49 @@ describe('Intune Resource Management', function() {
 
             done();
           });
+        });
+      });
+
+      it.skip('- getGroupsForMAMPolicy', function(done) {
+        client.ios.getGroupsForMAMPolicy(location, iOSPolicyId, null, function(error, result, request, response) {
+          should.not.exist(error);
+          result.should.exist;
+          response.statusCode.should.be.equal(200);
+
+          // Should have the 1 group we added when creating the policy
+          results.length.should.be.equal(1);
+
+          done();
+        });
+      });
+
+      it('- addGroupsForMAMPolicy', function(done) {
+        var groupProperties = {
+          properties: {
+            url: baseUrl + '/providers/Microsoft.Intune/locations/' + location + '/groups/' + userGroups[1].objectId
+          }
+        };
+
+        client.ios.addGroupForMAMPolicy(location, iOSPolicyId, userGroups[1].objectId, groupProperties, null, function(error, result, request, response) {
+          should.not.exist(error);
+
+          if (response.statusCode !== 200 && response.statusCode !== 204) {
+            response.statusCode.should.be.equal('200 or 204');
+          }
+
+          done();
+        });
+      });
+
+      it('- deleteGroupsForMAMPolicy', function(done) {
+        client.ios.deleteGroupForMAMPolicy(location, iOSPolicyId, userGroups[0].objectId, null, function(error, result, request, response) {
+          should.not.exist(error);
+
+          if (response.statusCode !== 200 && response.statusCode !== 204) {
+            response.statusCode.should.be.equal('200 or 204');
+          }
+
+          done();
         });
       });
     });
@@ -491,7 +593,7 @@ describe('Intune Resource Management', function() {
         var appId = androidApps[0].name;
         var appProperties = {
           properties: {
-            url: 'https://api-dogfood.resources.windows-int.net' + androidApps[0].id
+            url: baseUrl + androidApps[0].id
           }
         };
         client.android.addAppForPolicy(location, androidPolicyId, appId, appProperties, null, function(err, result, request, response) {
@@ -541,6 +643,49 @@ describe('Intune Resource Management', function() {
 
             done();
           });
+        });
+      });
+
+      it.skip('- getGroupsForMAMPolicy', function(done) {
+        client.android.getGroupsForMAMPolicy(location, androidPolicyId, null, function(error, result, request, response) {
+          should.not.exist(error);
+          result.should.exist;
+          response.statusCode.should.be.equal(200);
+
+          // Should have the 1 group we added when creating the policy
+          results.length.should.be.equal(1);
+
+          done();
+        });
+      });
+
+      it('- addGroupsForMAMPolicy', function(done) {
+        var groupProperties = {
+          properties: {
+            url: baseUrl + '/providers/Microsoft.Intune/locations/' + location + '/groups/' + userGroups[1].objectId
+          }
+        };
+
+        client.android.addGroupForPolicy(location, androidPolicyId, userGroups[1].objectId, groupProperties, null, function(error, result, request, response) {
+          should.not.exist(error);
+
+          if (response.statusCode !== 200 && response.statusCode !== 204) {
+            response.statusCode.should.be.equal('200 or 204');
+          }
+
+          done();
+        });
+      });
+
+      it('- deleteGroupsForMAMPolicy', function(done) {
+        client.android.deleteGroupForMAMPolicy(location, androidPolicyId, userGroups[0].objectId, null, function(error, result, request, response) {
+          should.not.exist(error);
+
+          if (response.statusCode !== 200 && response.statusCode !== 204) {
+            response.statusCode.should.be.equal('200 or 204');
+          }
+
+          done();
         });
       });
     });

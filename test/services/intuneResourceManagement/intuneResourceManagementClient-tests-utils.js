@@ -1,10 +1,25 @@
+//
+// Copyright (c) Microsoft and contributors.  All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
 var request = require('request');
 var promise = require('promise');
 var moment = require('moment');
 var should = require('should');
 var util = require('util');
 var TokenCloudCredentials = require('../../../lib/common/lib/services/credentials/tokenCloudCredentials');
-
 
 function IntuneTestUtils() {}
 
@@ -13,15 +28,21 @@ IntuneTestUtils.PolicyType = Object.freeze({
   Android: 1
 });
 
-IntuneTestUtils.getTokenCloudCredentials = function(username, password, clientId) {
+IntuneTestUtils.getAADAuthToken = function(username, password, clientId, targetResource) {
   if ((!username || typeof username !== 'string') ||
     (!password || typeof password !== 'string') ||
     (!clientId || typeof clientId !== 'string')) {
     return null;
   }
 
+  var authEndpoint = IntuneTestUtils.getAADAuthEndpoint(process.env['ENVIRONMENT']);
+
+  if (!targetResource) {
+    targetResource = authEndpoint.substring(0, authEndpoint.length - 1);
+  }
+
   return new promise(function(resolve, reject) {
-    request('https://login.windows-ppe.net/common/UserRealm/' + username + '?api-version=1.0',
+    request(authEndpoint + 'common/UserRealm/' + username + '?api-version=1.0',
       function(err, httpResponse, body) {
         if (err) {
           reject(err);
@@ -42,9 +63,9 @@ IntuneTestUtils.getTokenCloudCredentials = function(username, password, clientId
         }
 
         request.post({
-          url: 'https://login.windows-ppe.net/' + response.domain_name + '/oauth2/token',
+          url: authEndpoint + response.domain_name + '/oauth2/token',
           form: {
-            resource: 'https://management.azure.com/',
+            resource: targetResource,
             client_id: clientId,
             grant_type: 'password',
             username: username,
@@ -70,10 +91,7 @@ IntuneTestUtils.getTokenCloudCredentials = function(username, password, clientId
             reject(e);
           }
 
-          resolve(new TokenCloudCredentials({
-            subscriptionId: "None",
-            token: response.access_token
-          }));
+          resolve(response.access_token);
         });
       });
   });
@@ -224,6 +242,46 @@ IntuneTestUtils.done = function(numberOfPendingEvents, resolver) {
       }
     }
   }(numberOfPendingEvents, resolver);
+}
+
+IntuneTestUtils.getAADUserGroups = function(username, password, clientId, callback) {
+  var userGroups;
+  var graphServicePrincipalId = '00000002-0000-0000-c000-000000000000';
+  var graphEndpoint = IntuneTestUtils.getAADGraphEndpoint(process.env['ENVIRONMENT']);
+
+  IntuneTestUtils.getAADAuthToken(username, password, clientId, graphServicePrincipalId)
+    .then(function(token) {
+      var requestOptions = {
+        url: graphEndpoint + username.split('@')[1] + '/groups?api-version=1.6',
+        headers: {
+          "Authorization": 'Bearer ' + token
+        }
+      }
+
+      request(requestOptions, function(error, response, body) {
+        if (!error && response.statusCode === 200) {
+          callback(JSON.parse(body).value);
+        }
+      });
+    });
+
+  return userGroups;
+}
+
+IntuneTestUtils.getAADAuthEndpoint = function(environment) {
+  if (environment === 'dogfood') {
+    return 'https://login.windows-ppe.net/';
+  }
+
+  return 'https://login.windows.net/';
+}
+
+IntuneTestUtils.getAADGraphEndpoint = function(environment) {
+  if (environment === 'dogfood') {
+    return 'https://graph.ppe.windows.net/';
+  }
+
+  return 'https://graph.windows.net/';
 }
 
 module.exports = IntuneTestUtils;

@@ -6,7 +6,7 @@
 @echo off
 set autoRestVersion=0.13.0-Nightly20151110
 if  "%1" == "" (
-	set specFile="https://raw.githubusercontent.com/Azure/azure-rest-api-specs/master/arm-intune/2015-01-11-alpha/swagger/intune.json"
+	set specFile="https://raw.githubusercontent.com/vrmurthy01/azure-rest-api-specs/master/arm-intune/2015-01-14-privatepreview/swagger/intune.json"
 ) else (
     set specFile="%1"
 )
